@@ -902,8 +902,48 @@ class FacebookRegularItemPage(FacebookItemPage):
 
     def get_image_url(self: "FacebookRegularItemPage") -> str:
         try:
-            image_url = self.page.locator("img").first.get_attribute("src") or ""
-            return image_url
+            # The first <img> in DOM order is the logged-in user's avatar /
+            # messaging chrome, not the listing photo, so selecting img.first
+            # returned the same account icon for every listing (see #327).
+            # Facebook renders the listing's main photo as the largest image on
+            # the page, so we pick by rendered area instead of DOM position.
+            # When the accessible "Product photo" label is present (current
+            # layout) we restrict to those; otherwise we fall back to the
+            # largest image overall, which is locale-independent.
+            image_url = self.page.evaluate(
+                """
+                () => {
+                  const imgs = Array.from(document.querySelectorAll('img'));
+                  // Keep only real listing photos, dropping emoji, inline
+                  // spinners/placeholders (data: URIs) and UI chrome served
+                  // from the static asset paths.
+                  const isPhoto = (el) => {
+                    const s = el.currentSrc || el.src || '';
+                    return s.startsWith('http') && s.includes('fbcdn')
+                      && !s.includes('/emoji.') && !s.includes('/images/');
+                  };
+                  const area = (el) => {
+                    const r = el.getBoundingClientRect();
+                    return r.width * r.height;
+                  };
+                  const photos = imgs.filter(isPhoto);
+                  const labelled = photos.filter(
+                    (el) => (el.getAttribute('alt') || '')
+                      .toLowerCase().startsWith('product photo')
+                  );
+                  const pool = labelled.length ? labelled : photos;
+                  let best = null, bestArea = 0;
+                  for (const el of pool) {
+                    const a = area(el);
+                    if (a > bestArea) { bestArea = a; best = el; }
+                  }
+                  // Ignore icons/avatars, which are typically well under 100px.
+                  if (best && bestArea >= 100 * 100) return best.currentSrc || best.src;
+                  return '';
+                }
+                """
+            )
+            return image_url or ""
         except KeyboardInterrupt:
             raise
         except Exception as e:

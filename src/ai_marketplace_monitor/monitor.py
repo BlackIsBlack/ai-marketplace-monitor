@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 from logging import Logger
@@ -93,8 +94,45 @@ class MarketplaceMonitor:
                 continue
 
     def _launch_browser(self: "MarketplaceMonitor") -> Browser:
-        """Launch a browser, preferring Chromium if available, otherwise any installed browser."""
-        # Try browsers in order of preference
+        """Launch a browser.
+
+        Prefer CloakBrowser's stealth Chromium, which uses source-level
+        fingerprint patches to pass Facebook's bot detection and avoid the
+        captcha/checkpoint that a vanilla Playwright Chromium triggers. Its
+        ``launch()`` returns a standard Playwright ``Browser``, so the rest of
+        the scraping code is unchanged. If it is unavailable (not installed,
+        binary download fails, offline, ...) we fall back to the standard
+        Playwright browsers. Set ``AIMM_DISABLE_CLOAK=1`` to skip it entirely.
+        See https://github.com/CloakHQ/CloakBrowser
+        """
+        if os.environ.get("AIMM_DISABLE_CLOAK", "").strip().lower() not in ("1", "true", "yes"):
+            try:
+                import cloakbrowser  # type: ignore
+
+                if self.logger:
+                    self.logger.debug(
+                        "Launching CloakBrowser stealth Chromium "
+                        f"(v{getattr(cloakbrowser, 'CHROMIUM_VERSION', '?')}); "
+                        "the ~200MB binary is downloaded once on first use..."
+                    )
+                # stealth_args is on by default; headless mirrors the CLI flag.
+                browser = cloakbrowser.launch(headless=self.headless, stealth_args=True)
+                if self.logger:
+                    self.logger.info(
+                        f"""{hilight("[Browser]", "info")} Successfully launched CloakBrowser stealth Chromium.""",
+                        extra=aimm_event("browser_ready", engine="cloakbrowser"),
+                    )
+                return browser
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(
+                        f"""{hilight("[Browser]", "fail")} CloakBrowser unavailable ({e}); """
+                        "falling back to a standard browser."
+                    )
+
+        # Fallback: standard Playwright browsers, in order of preference.
         browser_types = [
             ("chromium", self.playwright.chromium),
             ("firefox", self.playwright.firefox),

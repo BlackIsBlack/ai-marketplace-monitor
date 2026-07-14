@@ -109,14 +109,25 @@ class MarketplaceMonitor:
             try:
                 import cloakbrowser  # type: ignore
 
+                # NOTE: do NOT use cloakbrowser.launch() here. It starts its own
+                # sync Playwright driver, which fails when the web UI is running
+                # ("Sync API inside the asyncio loop"). Instead we point our
+                # already-running Playwright driver at CloakBrowser's patched
+                # Chromium binary + stealth args. The anti-detection lives in the
+                # binary itself, so this keeps the full stealth behaviour while
+                # reusing the driver that launches successfully in this context.
                 if self.logger:
                     self.logger.debug(
-                        "Launching CloakBrowser stealth Chromium "
-                        f"(v{getattr(cloakbrowser, 'CHROMIUM_VERSION', '?')}); "
-                        "the ~200MB binary is downloaded once on first use..."
+                        "Resolving CloakBrowser stealth Chromium binary "
+                        "(~200MB, downloaded once on first use)..."
                     )
-                # stealth_args is on by default; headless mirrors the CLI flag.
-                browser = cloakbrowser.launch(headless=self.headless, stealth_args=True)
+                executable_path = cloakbrowser.ensure_binary()
+                stealth_args = cloakbrowser.get_default_stealth_args()
+                browser = self.playwright.chromium.launch(
+                    headless=self.headless,
+                    executable_path=executable_path,
+                    args=stealth_args,
+                )
                 if self.logger:
                     self.logger.info(
                         f"""{hilight("[Browser]", "info")} Successfully launched CloakBrowser stealth Chromium.""",

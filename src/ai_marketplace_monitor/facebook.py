@@ -20,6 +20,7 @@ from .utils import (
     BaseConfig,
     CounterItem,
     KeyboardMonitor,
+    SleepStatus,
     Translator,
     convert_to_seconds,
     counter,
@@ -278,6 +279,27 @@ class FacebookMarketplace(Marketplace):
     def get_item_config(cls: Type["FacebookMarketplace"], **kwargs: Any) -> FacebookItemConfig:
         return FacebookItemConfig(**kwargs)
 
+    def _is_logged_in(self: "FacebookMarketplace") -> bool:
+        """Return True once Facebook has established an authenticated session.
+
+        Facebook sets the ``c_user`` cookie (the logged-in user's id) only after
+        login — including any 2FA / security checkpoints — has fully completed.
+        Checking it is more reliable and locale-independent than inspecting the
+        page URL or DOM, and it stays False while a checkpoint is still pending.
+        """
+        try:
+            assert self.page is not None
+            return any(
+                cookie.get("name") == "c_user" and cookie.get("value")
+                for cookie in self.page.context.cookies()
+            )
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"{hilight('[Login]', 'fail')} Could not read cookies: {e}")
+            return False
+
     def login(self: "FacebookMarketplace") -> None:
         assert self.browser is not None
 
@@ -334,21 +356,62 @@ class FacebookMarketplace(Marketplace):
             if self.logger:
                 self.logger.error(f"""{hilight("[Login]", "fail")} {e}""")
 
-        # in case there is a need to enter additional information
-        login_wait_time = (
-            60 if self.config.login_wait_time is None else self.config.login_wait_time
-        )
-        if login_wait_time > 0:
+        # Wait until the account is actually logged in before searching, instead
+        # of blindly sleeping for a fixed time. We poll for the authenticated
+        # session (see _is_logged_in) so you get as long as you need to clear any
+        # 2FA / security checkpoints, and searching starts the instant login
+        # completes — or immediately if a cached session is already logged in.
+        #
+        # login_wait_time now caps how long we wait for login to complete:
+        #   None -> up to 5 minutes (default)
+        #   > 0  -> up to that many seconds
+        #   0    -> do not wait at all (unchanged escape hatch)
+        configured_wait = self.config.login_wait_time
+        if configured_wait == 0:
+            return
+        max_wait = 300 if configured_wait is None else configured_wait
+        poll_interval = 3
+
+        if self._is_logged_in():
             if self.logger:
-                self.logger.info(
-                    f"""{hilight("[Login]", "info")} Waiting {humanize.naturaldelta(login_wait_time)}"""
-                    + (
-                        f""" or press {hilight("Esc")} when you are ready."""
-                        if self.keyboard_monitor is not None
-                        else ""
-                    )
+                self.logger.info(f"""{hilight("[Login]", "succ")} Already logged in.""")
+            return
+
+        if self.logger:
+            self.logger.info(
+                f"""{hilight("[Login]", "info")} Waiting for you to finish logging in """
+                "(including any security checks); searching will start automatically "
+                f"""once login is confirmed (up to {humanize.naturaldelta(max_wait)})"""
+                + (
+                    f""", or press {hilight("Esc")} to start now."""
+                    if self.keyboard_monitor is not None
+                    else "."
                 )
-            doze(login_wait_time, keyboard_monitor=self.keyboard_monitor)
+            )
+
+        waited = 0
+        while waited < max_wait:
+            status = doze(poll_interval, keyboard_monitor=self.keyboard_monitor)
+            if status == SleepStatus.BY_KEYBOARD:
+                if self.logger:
+                    self.logger.info(
+                        f"""{hilight("[Login]", "info")} Esc pressed — starting search now."""
+                    )
+                return
+            if self._is_logged_in():
+                if self.logger:
+                    self.logger.info(
+                        f"""{hilight("[Login]", "succ")} Login confirmed — starting search."""
+                    )
+                return
+            waited += poll_interval
+
+        if self.logger:
+            self.logger.warning(
+                f"""{hilight("[Login]", "fail")} Login not confirmed after """
+                f"""{humanize.naturaldelta(max_wait)}; starting anyway — searches may fail """
+                "until you are logged in. Increase 'login_wait_time' if you need longer."
+            )
 
     def search(
         self: "FacebookMarketplace", item_config: FacebookItemConfig
